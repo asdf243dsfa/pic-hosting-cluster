@@ -9,7 +9,6 @@ const GITLAB_CONFIGS = [
 ];
 
 // GitHub 配置
-const GITHUB_REPOS = [''];  // GitHub 仓库名列表
 const GITHUB_USERNAME = '';  // GitHub 用户名
 const GITHUB_PAT = '';  // GitHub 个人访问令牌
 
@@ -56,6 +55,10 @@ const DIR = '';
 
 // 定义集群里全部节点连接状态的密码验证，区分大小写（优先使用自定义密码，若为空则使用 GITHUB_PAT）
 const CHECK_PASSWORD = '' || GITHUB_PAT;
+
+// GitHub 备份策略
+const STRATEGY = 'size'  // 可选 [size (默认) | quantity | 指定节点]; size: 选择容量最少的仓库来存储文件; quantity: 选择文件最少的仓库来存储文件; 指定节点: 比如  pic1 或者 pic2
+const DELETE = 'true'  // 可选 [true (默认) | false]，已复制到 GitHub 的文件，是否从 R2 删除
 
 // 用户配置区域结束 =================================
 
@@ -185,13 +188,8 @@ export default {
       }
     }
 
-    const isValidGithubRepos = Array.isArray(GITHUB_REPOS) &&
-      GITHUB_REPOS.length > 0 &&
-      GITHUB_REPOS.some(repo => repo.trim() !== '');
-
-    const githubRepos = isValidGithubRepos
-      ? GITHUB_REPOS.filter(repo => repo.trim() !== '')
-      : GITLAB_CONFIGS.map(config => config.name);
+    // 直接使用 GITLAB_CONFIGS 中的 name 作为 GitHub 仓库名
+    const githubRepos = GITLAB_CONFIGS.map(config => config.name);
 
     const FILE = url.pathname.split('/').pop();
 
@@ -516,8 +514,8 @@ async function listProjects(gitlabConfigs, githubRepos, githubUsername, githubPa
 
     // 添加 GitLab 结果
     gitlabConfigs.forEach((config, index) => {
-      const [status, username, fileCount, totalSize] = gitlabResults[index];
-      result += `GitLab: Project ID ${config.id} - ${status} (Username: ${username}, Files: ${fileCount}, Size: ${totalSize})\n`;
+      const [status, username, fileCount] = gitlabResults[index];
+      result += `GitLab: Project ID ${config.id} - ${status} (Username: ${username}, Files: ${fileCount})\n`;
     });
 
     // 添加 R2 结果
@@ -632,67 +630,10 @@ async function checkGitHubRepo(owner, repo, pat) {
   }
 }
 
-// 获取单个文件大小的辅助函数
-async function getFileSizeFromGitLab(projectId, filePath, pat, retries = 3) {
-  for (let i = 0; i < retries; i++) {
-    try {
-      // 使用 raw 端点和 HEAD 请求获取文件大小
-      const fileUrl = `https://gitlab.com/api/v4/projects/${projectId}/repository/files${filePath}/raw?ref=main`;
-      const response = await fetch(fileUrl, {
-        method: 'HEAD',
-        headers: { 'PRIVATE-TOKEN': pat }
-      });
-
-      if (response.status === 200) {
-        const contentLength = response.headers.get('content-length');
-        return contentLength ? parseInt(contentLength, 10) : 0;
-      } else if (response.status === 429) {
-        // 遇到限流时等待后重试
-        await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
-        continue;
-      }
-      console.error(`Failed to get file size: ${response.status}`);
-      return 0;
-    } catch (error) {
-      if (i === retries - 1) {
-        console.error(`Error fetching file size:`, error);
-      }
-      if (i < retries - 1) {
-        await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
-        continue;
-      }
-    }
-    return 0;
-  }
-  return 0;
-}
-
-// 添加并发控制的辅助函数
-async function asyncPool(concurrency, iterable, iteratorFn) {
-  const ret = [];
-  const executing = new Set();
-
-  for (const item of iterable) {
-    const p = Promise.resolve().then(() => iteratorFn(item));
-    ret.push(p);
-    executing.add(p);
-
-    const clean = () => executing.delete(p);
-    p.then(clean).catch(clean);
-
-    if (executing.size >= concurrency) {
-      await Promise.race(executing);
-    }
-  }
-
-  return Promise.all(ret);
-}
-
 // 检查 GitLab 项目的异步函数
 async function checkGitLabProject(projectId, pat) {
   const projectUrl = `https://gitlab.com/api/v4/projects/${projectId}`;
-  // 步骤1: 获取文件列表
-  const filesUrl = `https://gitlab.com/api/v4/projects/${projectId}/repository/tree?ref=main&path=${DIR}`;
+  const filesUrl = `https://gitlab.com/api/v4/projects/${projectId}/repository/tree?ref=main&path=${DIR}&recursive=true&per_page=10000`;
 
   try {
     const [projectResponse, filesResponse] = await Promise.all([
@@ -706,45 +647,26 @@ async function checkGitLabProject(projectId, pat) {
 
     if (projectResponse.status === 200) {
       const projectData = await projectResponse.json();
-      let totalSize = 0;
       let fileCount = 0;
 
       if (filesResponse.status === 200) {
         const filesData = await filesResponse.json();
-        fileCount = filesData.length;
-
-        if (fileCount > 0) {
-          console.log(`Found ${fileCount} files in ${DIR} directory`);
-
-          // 步骤2: 并发获取每个文件的大小
-          const CONCURRENT_REQUESTS = 100;
-          const sizes = await asyncPool(CONCURRENT_REQUESTS, filesData, async (file) => {
-            // 构造文件路径，格式为 /files%2Ffilename
-            const encodedPath = `/${encodeURIComponent(file.path)}`;
-            const size = await getFileSizeFromGitLab(projectId, encodedPath, pat);
-            console.log(`File: ${file.path}, Size: ${formatSize(size)}`);
-            return size;
-          });
-
-          totalSize = sizes.reduce((acc, size) => acc + size, 0);
-          console.log(`Total size: ${formatSize(totalSize)}`);
-        }
+        fileCount = filesData.filter(item => item.type === 'blob').length;
       }
 
       return [
         `working (${projectData.visibility})`,
         projectData.owner.username,
-        fileCount,
-        formatSize(totalSize)
+        fileCount
       ];
     } else if (projectResponse.status === 404) {
-      return ['not found', 'Unknown', 0, '0 B'];
+      return ['not found', 'Unknown', 0];
     } else {
-      return ['disconnect', 'Unknown', 0, '0 B'];
+      return ['disconnect', 'Unknown', 0];
     }
   } catch (error) {
     console.error('GitLab project check error:', error);
-    return ['disconnect', 'Error', 0, '0 B'];
+    return ['disconnect', 'Error', 0];
   }
 }
 

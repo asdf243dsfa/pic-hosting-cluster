@@ -8,9 +8,15 @@ on:
 jobs:
   S3_To_GitHub:
     runs-on: ubuntu-latest
+
+    env:
+      ACCOUNT_ID: ${{ secrets.ACCOUNT_ID }}
+      WORKER_NAME: ${{ secrets.WORKER_NAME }}
+      API_TOKEN: ${{ secrets.API_TOKEN }}
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4.2.2
 
       - name: Sync files to GitHub
-        uses: fscarmen2/r2_to_github@v1.0.1
+        uses: fscarmen2/r2_to_github@v1.0.2

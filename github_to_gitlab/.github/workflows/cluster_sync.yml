@@ -8,9 +8,15 @@ on:
 jobs:
   GitHub_To_GitLab :
     runs-on: ubuntu-latest
+
+    env:
+      ACCOUNT_ID: ${{ secrets.ACCOUNT_ID }}
+      WORKER_NAME: ${{ secrets.WORKER_NAME }}
+      API_TOKEN: ${{ secrets.API_TOKEN }}
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4.2.2
 
     - name: Clone Repo to GitLab
-      uses: fscarmen2/github_to_gitlab@v1.0.0
+      uses: fscarmen2/github_to_gitlab@v1.0.1
